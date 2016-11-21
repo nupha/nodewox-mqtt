@@ -23,13 +23,9 @@ import select
 import socket
 HAVE_SSL = True
 try:
-    import ssl
-    cert_reqs = ssl.CERT_REQUIRED
-    tls_version = ssl.PROTOCOL_TLSv1
+    from M2Crypto import RSA, X509, SSL, m2
 except:
     HAVE_SSL = False
-    cert_reqs = None
-    tls_version = None
 import struct
 import sys
 import threading
@@ -475,8 +471,8 @@ class Client(object):
         user_data_set() function.
 
         The protocol argument allows explicit setting of the MQTT version to
-        use for this client. Can be paho.mqtt.client.MQTTv311 (v3.1.1) or
-        paho.mqtt.client.MQTTv31 (v3.1), with the default being v3.1.1 If the
+        use for this client. Can be nodewox.mqtt.client.MQTTv311 (v3.1.1) or
+        nodewox.mqtt.client.MQTTv31 (v3.1), with the default being v3.1.1 If the
         broker reports that the client connected with an invalid protocol
         version, the client will automatically attempt to reconnect using v3.1
         instead.
@@ -497,7 +493,7 @@ class Client(object):
         self._last_retry_check = 0
         self._clean_session = clean_session
         if client_id == "" or client_id is None:
-            self._client_id = "paho/" + "".join(random.choice("0123456789ADCDEF") for x in range(23-5))
+            self._client_id = "nxmqtt/" + "".join(random.choice("0123456789ADCDEF") for x in range(23-5))
         else:
             self._client_id = client_id
 
@@ -548,9 +544,6 @@ class Client(object):
         self._tls_certfile = None
         self._tls_keyfile = None
         self._tls_ca_certs = None
-        self._tls_cert_reqs = None
-        self._tls_ciphers = None
-        self._tls_version = tls_version
         self._tls_insecure = False
         # No default callbacks
         self._on_log = None
@@ -581,10 +574,10 @@ class Client(object):
 
         self.__init__(client_id, clean_session, userdata)
 
-    def tls_set(self, ca_certs, certfile=None, keyfile=None, cert_reqs=cert_reqs, tls_version=tls_version, ciphers=None):
+    def tls_set(self, ca_certs, certfile=None, keyfile=None):
         """Configure network encryption and authentication options. Enables SSL/TLS support.
 
-        ca_certs : a string path to the Certificate Authority certificate files
+        ca_certs : a string that hold content of Certificate Authority certificates
         that are to be treated as trusted by this client. If this is the only
         option given then the client will operate in a similar manner to a web
         browser. That is to say it will require the broker to have a
@@ -593,7 +586,7 @@ class Client(object):
         authentication. This provides basic network encryption but may not be
         sufficient depending on how the broker is configured.
 
-        certfile and keyfile are strings pointing to the PEM encoded client
+        certfile and keyfile are strings hoding content of PEM encoded client
         certificate and private keys respectively. If these arguments are not
         None then they will be used as client information for TLS based
         authentication.  Support for this feature is broker dependent. Note
@@ -601,23 +594,9 @@ class Client(object):
         decrypt it, Python will ask for the password at the command line. It is
         not currently possible to define a callback to provide the password.
 
-        cert_reqs allows the certificate requirements that the client imposes
-        on the broker to be changed. By default this is ssl.CERT_REQUIRED,
-        which means that the broker must provide a certificate. See the ssl
-        pydoc for more information on this parameter.
-
-        tls_version allows the version of the SSL/TLS protocol used to be
-        specified. By default TLS v1 is used. Previous versions (all versions
-        beginning with SSL) are possible but not recommended due to possible
-        security problems.
-
-        ciphers is a string specifying which encryption ciphers are allowable
-        for this connection, or None to use the defaults. See the ssl pydoc for
-        more information.
-
         Must be called before connect() or connect_async()."""
         if HAVE_SSL is False:
-            raise ValueError('This platform has no SSL/TLS.')
+            raise ValueError('M2Crypto not imported.')
 
         if sys.version < '2.7':
             raise ValueError('Python 2.7 is the minimum supported version for TLS.')
@@ -625,33 +604,17 @@ class Client(object):
         if ca_certs is None:
             raise ValueError('ca_certs must not be None.')
 
-        try:
-            f = open(ca_certs, "r")
-        except IOError as err:
-            raise IOError(ca_certs+": "+err.strerror)
-        else:
-            f.close()
         if certfile is not None:
-            try:
-                f = open(certfile, "r")
-            except IOError as err:
-                raise IOError(certfile+": "+err.strerror)
-            else:
-                f.close()
+            assert isinstance(certfile, basestring)
+            assert len(certfile)>0
+
         if keyfile is not None:
-            try:
-                f = open(keyfile, "r")
-            except IOError as err:
-                raise IOError(keyfile+": "+err.strerror)
-            else:
-                f.close()
+            assert isinstance(keyfile, basestring)
+            assert len(keyfile)>0
 
         self._tls_ca_certs = ca_certs
         self._tls_certfile = certfile
         self._tls_keyfile = keyfile
-        self._tls_cert_reqs = cert_reqs
-        self._tls_version = tls_version
-        self._tls_ciphers = ciphers
 
     def tls_insecure_set(self, value):
         """Configure verification of the server hostname in the server certificate.
@@ -801,34 +764,43 @@ class Client(object):
         # Put messages in progress in a valid state.
         self._messages_reconnect_reset()
 
-        try:
-            if (sys.version_info[0] == 2 and sys.version_info[1] < 7) or (sys.version_info[0] == 3 and sys.version_info[1] < 2):
-                sock = socket.create_connection((self._host, self._port))
-            else:
-                sock = socket.create_connection((self._host, self._port), source_address=(self._bind_address, 0))
-        except socket.error as err:
-            if err.errno != errno.EINPROGRESS and err.errno != errno.EWOULDBLOCK and err.errno != EAGAIN:
-                raise
-
-        if self._tls_ca_certs is not None:
-            self._ssl = ssl.wrap_socket(
-                sock,
-                certfile=self._tls_certfile,
-                keyfile=self._tls_keyfile,
-                ca_certs=self._tls_ca_certs,
-                cert_reqs=self._tls_cert_reqs,
-                ssl_version=self._tls_version,
-                ciphers=self._tls_ciphers)
-
-            if self._tls_insecure is False:
-                if sys.version_info[0] < 3 or (sys.version_info[0] == 3 and sys.version_info[1] < 2):
-                    self._tls_match_hostname()
+        if self._tls_ca_certs is None:
+            try:
+                if (sys.version_info[0] == 2 and sys.version_info[1] < 7) or (sys.version_info[0] == 3 and sys.version_info[1] < 2):
+                    sock = socket.create_connection((self._host, self._port))
                 else:
-                    ssl.match_hostname(self._ssl.getpeercert(), self._host)
+                    sock = socket.create_connection((self._host, self._port), source_address=(self._bind_address, 0))
+            except socket.error as err:
+                if err.errno != errno.EINPROGRESS and err.errno != errno.EWOULDBLOCK and err.errno != EAGAIN:
+                    raise
+
+        else:
+            ctx = SSL.Context("sslv23")
+            if self._tls_certfile is not None:
+                x509 = X509.load_cert_string(self._tls_certfile)
+                if self._tls_keyfile is not None:
+                    pkey = RSA.load_key_string(self._tls_keyfile)
+                else:
+                    pkey = RSA.load_key_string(self._tls_certfile)
+                m2.ssl_ctx_use_x509(ctx.ctx, x509.x509)
+                m2.ssl_ctx_use_rsa_privkey(ctx.ctx, pkey.rsa)
+
+            sock = SSL.Connection(ctx)
+            try:
+                sock.connect((self._host, self._port))
+            except socket.error as err:
+                if err.errno != errno.EINPROGRESS and err.errno != errno.EWOULDBLOCK and err.errno != EAGAIN:
+                    raise
+
+            #if self._tls_insecure is False:
+            #    if sys.version_info[0] < 3 or (sys.version_info[0] == 3 and sys.version_info[1] < 2):
+            #        self._tls_match_hostname()
+            #    else:
+            #        ssl.match_hostname(self._ssl.getpeercert(), self._host)
 
         if self._transport == "websockets":
             if self._tls_ca_certs is not None:
-                self._ssl = WebsocketWrapper(self._ssl, self._host, self._port, True)
+                sock = WebsocketWrapper(sock, self._host, self._port, True)
             else:
                 sock = WebsocketWrapper(sock, self._host, self._port, False)
 
@@ -1704,7 +1676,9 @@ class Client(object):
                 print(err)
                 return 1
             else:
-                if len(command) == 0:
+                if command is None:
+                    return MQTT_ERR_AGAIN
+                elif len(command) == 0:
                     return 1
                 command = struct.unpack("!B", command)
                 self._in_packet['command'] = command[0]
